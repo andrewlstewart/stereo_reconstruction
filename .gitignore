@@ -129,5 +129,4 @@ dmypy.json
 .pyre/
 .vscode/
 data/test/
-data/calibration
 data/test_output
