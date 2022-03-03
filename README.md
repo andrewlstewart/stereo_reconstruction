@@ -13,7 +13,9 @@ An example of stereo reconstruction using this repo is shown here:
 <p align="center">
 <img src="./readme_images/animation.gif" alt="Basic reconstruction" style="width:750px;"/>
 </p>
+
 ## Currently implemented
+
 * Zhang's method to compute the camera calibration matrix of a pinhole camera.
     * src/stereo_reconstruction/intrinsics.py
 * Computation of the fundamental matrix and essential matrix with RANSAC.  Also computes the relative rotation of the second camera and the baseline (up to scale) between the two cameras.  TODO: need to actually check if the output is reasonable (2022-02-03).
