@@ -18,12 +18,28 @@ In practice, you should probably just call cv2.calibrateCamera https://docs.open
 
 from typing import Sequence, Tuple
 
+import argparse
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import cv2
 import matplotlib.pyplot as plt
+
+
+class TupleArgSplitter(argparse.Action):
+    """
+    Splits command line arguments into tuples.
+
+    i.e., --option 9,5 becomes namespace.option = (9,5)
+    """
+    def __init__(self, option_strings, dest, nargs=None, **kwargs):
+        if nargs is not None:
+            raise ValueError("nargs not allowed")
+        super().__init__(option_strings, dest, **kwargs)
+    def __call__(self, parser, namespace, values, option_string=None):
+        values_ = tuple([int(val) for val in values.split(',')])
+        setattr(namespace, self.dest, values_)
 
 
 class HomographyIllFittedError(Exception):
@@ -178,11 +194,22 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
     return K
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stereo_images_path", type=Path, default=Path.cwd() / 'data/calibration')
+    parser.add_argument("--square_size", type=float, default='22.1')  # mm
+    parser.add_argument("--pattern_size", action=TupleArgSplitter, default=(9,6))
+    parser.add_argument("--output_path", type=Path, default=Path.cwd() / 'output')
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
+
     # Constants related to the calibration pattern.
-    square_size = 22.1  # mm
-    pattern_size = (9, 6)
-    image_root = (Path.cwd() / 'data/calibration')
+    square_size = args.square_size
+    pattern_size = args.pattern_size
+    image_root = args.stereo_images_path
 
     # If there are images which cause the camera matrix computation to fail, you can add them to this list and they will get ignored
     left_bad_images = []
@@ -192,12 +219,18 @@ def main() -> int:
 
     print(left_K)
 
-    right_bad_images = []
+    args.output_path.mkdir(parents=True, exist_ok=True)
+    np.save(args.output_path / 'K1.npy', left_K)
+
+
+    right_bad_images = ['image01']
     right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
 
     right_K = get_camera_matrix(images=right_images[1:], pattern_size=pattern_size, square_size=square_size, visualize=False)
 
     print(right_K)
+
+    np.save(args.output_path / 'K2.npy', right_K)
 
     return 0
 
