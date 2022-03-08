@@ -487,6 +487,17 @@ def main() -> int:
         print(f'Second camera orientation:\n{R}')
         print(f'Baseline:\n{t}')
 
+        # Ecv, mask = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.9999, 0.01)
+        # in_calibrated_pts1 = []
+        # in_calibrated_pts2 = []
+        # for idx, m in enumerate(mask[:,0]):
+        #     if m:
+        #         in_calibrated_pts1.append(calibrated_pts1[idx])
+        #         in_calibrated_pts2.append(calibrated_pts2[idx])
+        # in_calibrated_pts1 = np.vstack(in_calibrated_pts1)
+        # in_calibrated_pts2 = np.vstack(in_calibrated_pts2)
+        # R, t = get_baseline(Ecv, in_calibrated_pts1, in_calibrated_pts2, c, cp)
+
     return 0
 
 
