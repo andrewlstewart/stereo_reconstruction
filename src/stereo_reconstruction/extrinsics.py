@@ -229,7 +229,9 @@ def get_baseline(E: npt.NDArray[np.float32],
         R = Pp[:, :3]
         t = Pp[:, 3]
 
-        Xi = R @ ((np.array((0, 0, 1)) - t).reshape(-1, 1))
+        #  https://www.youtube.com/watch?v=uHApDqH-8UE&list=PLgnQpQtFTOGRYjqjdZxTEQPZuFHQa7O7Y&t=1941s
+
+        Xi = R @ np.hstack((np.eye(3), t.reshape(-1,1))) @ np.array((0, 0, cp, 1)).reshape(-1, 1)
 
         angle = np.arccos(np.dot(X[:,0], Xi[:,0]) / (np.linalg.norm(Xi)*np.linalg.norm(X)))
 
