@@ -496,7 +496,7 @@ def main() -> int:
         #         in_calibrated_pts2.append(calibrated_pts2[idx])
         # in_calibrated_pts1 = np.vstack(in_calibrated_pts1)
         # in_calibrated_pts2 = np.vstack(in_calibrated_pts2)
-        # R, t = get_baseline(Ecv, in_calibrated_pts1, in_calibrated_pts2, c, cp)
+        # Rcv, tcv = get_baseline(Ecv, in_calibrated_pts1, in_calibrated_pts2, c, cp)
 
     return 0
 
