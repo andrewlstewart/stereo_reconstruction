@@ -211,7 +211,7 @@ def main() -> int:
     pattern_size = args.pattern_size
     image_root = args.stereo_images_path
 
-    # If there are images which cause the camera matrix computation to fail, you can add them to this list and they will get ignored
+    # # If there are images which cause the camera matrix computation to fail, you can add them to this list and they will get ignored
     left_bad_images = []
     # My images are concatenated horizontally, so the left image is in the range 0:2027 and the right image is in the range 2028:4055
     left_images = [(image_path.name, cv2.imread(str(image_path))[:, :2028, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in left_bad_images]
@@ -223,7 +223,7 @@ def main() -> int:
     np.save(args.output_path / 'K1.npy', left_K)
 
 
-    right_bad_images = ['image01']
+    right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05']
     right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
 
     right_K = get_camera_matrix(images=right_images[1:], pattern_size=pattern_size, square_size=square_size, visualize=False)
