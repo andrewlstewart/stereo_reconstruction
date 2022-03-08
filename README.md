@@ -18,6 +18,6 @@ An example of stereo reconstruction using this repo is shown here:
 
 * Zhang's method to compute the camera calibration matrix of a pinhole camera.
     * src/stereo_reconstruction/intrinsics.py
-* Computation of the fundamental matrix and essential matrix with RANSAC.  Also computes the relative rotation of the second camera and the baseline (up to scale) between the two cameras.  TODO: need to actually check if the output is reasonable (2022-02-03).
+* Computation of the fundamental matrix and essential matrix with RANSAC.  Also computes the relative rotation of the second camera and the baseline (up to scale) between the two cameras.  The rotation + baseline should not be relied upon.  I think it's giving incorrect values but I can't find the source of the issue.
     * src/stereo_reconstruction/extrinics.py
 * Working on cleaning the code to compute disparities.
