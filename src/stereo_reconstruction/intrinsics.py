@@ -189,7 +189,7 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
     AAT = np.linalg.cholesky(B)  # https://www.youtube.com/watch?v=-9He7Nu3u8s&t=1529s
 
     K = np.linalg.inv(np.transpose(AAT))
-    K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
+    # K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
 
     return K
 
@@ -197,7 +197,7 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stereo_images_path", type=Path, default=Path.cwd() / 'data/calibration')
-    parser.add_argument("--square_size", type=float, default='22.1')  # mm
+    parser.add_argument("--square_size", type=float, default='0.0221')  # m
     parser.add_argument("--pattern_size", action=TupleArgSplitter, default=(9,6))
     parser.add_argument("--output_path", type=Path, default=Path.cwd() / 'output')
     return parser.parse_args()
@@ -214,14 +214,13 @@ def main() -> int:
     # # If there are images which cause the camera matrix computation to fail, you can add them to this list and they will get ignored
     left_bad_images = []
     # My images are concatenated horizontally, so the left image is in the range 0:2027 and the right image is in the range 2028:4055
-    left_images = [(image_path.name, cv2.imread(str(image_path))[:, :2028, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in left_bad_images]
+    left_images = sorted([(image_path.name, cv2.imread(str(image_path))[:, :2028, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in left_bad_images])
     left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False)
 
     print(left_K)
 
     args.output_path.mkdir(parents=True, exist_ok=True)
     np.save(args.output_path / 'K1.npy', left_K)
-
 
     right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05']
     right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
