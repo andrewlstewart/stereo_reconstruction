@@ -130,3 +130,7 @@ dmypy.json
 .vscode/
 data/test/
 data/test_output
+
+# MAC Stuff
+*.DS_STORE
+output/
