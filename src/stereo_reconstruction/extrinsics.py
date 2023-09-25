@@ -21,13 +21,19 @@ from abc import ABC, abstractmethod
 import argparse
 from pathlib import Path
 import itertools
+import math
 
 import numpy as np
 import numpy.typing as npt
 import cv2
 
+import utils as sr_utils
+
 
 class Sampler(ABC):
+    """
+    Abstract base class to set the randomization seed of a sampler
+    """
     def __init__(self, seed: Optional[int] = None):
         self.rng = np.random.default_rng()
         if seed:
@@ -290,11 +296,80 @@ def get_baseline(E: npt.NDArray[np.float32],
     return best_R, best_t
 
 
-def fundamental_equality(F: npt.NDArray[np.float32], correspondences: Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]):
+def _fundamental_equality(F: npt.NDArray[np.float32], correspondences: Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]):
+    """
+    This is what I thought the test condition for the fundamental matrix should be but OpenCV uses a different one.  Refer to fundamental_equality().
+    Note, this test doesn't produce very good results and the epipolar lines aren't consisten with what is expected.
+    """
     x1, x2 = correspondences
     hx1 = np.hstack((x1, np.ones((x1.shape[0], 1)))).T
     hx2 = np.hstack((x2, np.ones((x2.shape[0], 1)))).T
     return np.diagonal(hx2.T @ F @ hx1)
+
+
+def fundamental_equality(F: npt.NDArray[np.float32], correspondences: Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]):
+    """
+    This is the test criteria that OpenCV uses for the fundamental matrix
+    """
+    # https://github.com/opencv/opencv/blob/3889dcf3f816cc1b44a2b4de9cd7c5f4ebb22f70/modules/calib3d/src/fundam.cpp#L796C5-L796C5
+    # for( i = 0; i < count; i++ )
+    #     {
+    #         double a, b, c, d1, d2, s1, s2;
+
+    #         a = F[0]*m1[i].x + F[1]*m1[i].y + F[2];
+    #         b = F[3]*m1[i].x + F[4]*m1[i].y + F[5];
+    #         c = F[6]*m1[i].x + F[7]*m1[i].y + F[8];
+
+    #         s2 = 1./(a*a + b*b);
+    #         d2 = m2[i].x*a + m2[i].y*b + c;
+
+    #         a = F[0]*m2[i].x + F[3]*m2[i].y + F[6];
+    #         b = F[1]*m2[i].x + F[4]*m2[i].y + F[7];
+    #         c = F[2]*m2[i].x + F[5]*m2[i].y + F[8];
+
+    #         s1 = 1./(a*a + b*b);
+    #         d1 = m1[i].x*a + m1[i].y*b + c;
+
+    #         err[i] = (float)std::max(d1*d1*s1, d2*d2*s2);
+    #     }
+
+    x1, x2 = correspondences
+    hx1 = np.hstack((x1, np.ones((x1.shape[0], 1)))).T
+    hx2 = np.hstack((x2, np.ones((x2.shape[0], 1)))).T
+
+    # for inc in range(len(x1)):
+    #     a = F[0,0] * x1[inc][0] + F[0,1] * x1[inc][1] + F[0,2]
+    #     b = F[1,0] * x1[inc][0] + F[1,1] * x1[inc][1] + F[1,2]
+    #     c = F[2,0] * x1[inc][0] + F[2,1] * x1[inc][1] + F[2,2]
+    #     s2 = 1 / (a*a + b*b)
+    #     d2 = x2[inc][0] * a + x2[inc][1] * b + c
+
+    abc = F @ hx1
+    s2 = 1 / np.sum(abc[:2,:]**2, axis=0)
+    d2 = np.diag(np.dot(hx2.T, abc))
+
+    abc = F.T @ hx2
+    s1 = 1 / np.sum(abc[:2,:]**2, axis=0)
+    d1 = np.diag(np.dot(hx1.T, abc))
+    
+    error = np.maximum(d1*d1*s1, d2*d2*s2)
+
+    return error
+
+
+def _essential_equality(E: npt.NDArray[np.float32],
+                       correspondences: Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]],
+                       c1: float,
+                       c2: float
+                       ):
+    """
+    Similar to the fundamental matrix, the "obvious" test is not the one used by OpenCV.
+    """
+    # https://www.youtube.com/watch?v=zX5NeY-GTO0&list=PLgnQpQtFTOGRYjqjdZxTEQPZuFHQa7O7Y&t=2131s
+    x1, x2 = correspondences
+    hx1 = np.hstack((x1, np.ones((x1.shape[0], 1))*c1)).T
+    hx2 = np.hstack((x2, np.ones((x2.shape[0], 1))*c2)).T
+    return np.diagonal(hx2.T @ E @ hx1)
 
 
 def essential_equality(E: npt.NDArray[np.float32],
@@ -302,11 +377,60 @@ def essential_equality(E: npt.NDArray[np.float32],
                        c1: float,
                        c2: float
                        ):
-    # https://www.youtube.com/watch?v=zX5NeY-GTO0&list=PLgnQpQtFTOGRYjqjdZxTEQPZuFHQa7O7Y&t=2131s
+    """
+    Similar to above, this is the test criteria that OpenCV uses for the essential matrix.
+    """
+    # https://github.com/opencv/opencv/blob/3889dcf3f816cc1b44a2b4de9cd7c5f4ebb22f70/modules/calib3d/src/five-point.cpp#L375
+    # {
+    #     Mat X1 = _m1.getMat(), X2 = _m2.getMat(), model = _model.getMat();
+    #     const Point2d* x1ptr = X1.ptr<Point2d>();
+    #     const Point2d* x2ptr = X2.ptr<Point2d>();
+    #     int n = X1.checkVector(2);
+    #     Matx33d E(model.ptr<double>());
+
+    #     _err.create(n, 1, CV_32F);
+    #     Mat err = _err.getMat();
+
+    #     for (int i = 0; i < n; i++)
+    #     {
+    #         Vec3d x1(x1ptr[i].x, x1ptr[i].y, 1.);
+    #         Vec3d x2(x2ptr[i].x, x2ptr[i].y, 1.);
+    #         Vec3d Ex1 = E * x1;
+    #         Vec3d Etx2 = E.t() * x2;
+    #         double x2tEx1 = x2.dot(Ex1);
+
+    #         double a = Ex1[0] * Ex1[0];
+    #         double b = Ex1[1] * Ex1[1];
+    #         double c = Etx2[0] * Etx2[0];
+    #         double d = Etx2[1] * Etx2[1];
+
+    #         err.at<float>(i) = (float)(x2tEx1 * x2tEx1 / (a + b + c + d));
+    #     }
+    # }
+
     x1, x2 = correspondences
     hx1 = np.hstack((x1, np.ones((x1.shape[0], 1))*c1)).T
     hx2 = np.hstack((x2, np.ones((x2.shape[0], 1))*c2)).T
-    return np.diagonal(hx2.T @ E @ hx1)
+
+    # for idx in range(len(x1)):
+    #     Ex1 = E @ hx1[:, idx]
+    #     Etx2 = E.T @ hx2[:, idx]
+    #     x2tEx1 = np.dot(hx2[:, idx], Ex1)
+    #     a = Ex1[0] * Ex1[0]
+    #     b = Ex1[1] * Ex1[1]
+    #     c = Etx2[0] * Etx2[0]
+    #     d = Etx2[1] * Etx2[1]
+    #     err = (x2tEx1 * x2tEx1) / (a + b + c + d)
+    
+    Ex1 = E @ hx1
+    Etx2 = E.T @ hx2
+    x2tEx1 = np.sum(hx2 * Ex1, axis=0)
+
+    ab = np.sum((Ex1[:2, :]**2), axis=0)
+    cd = np.sum((Etx2[:2, :]**2), axis=0)
+    error = x2tEx1**2 / (ab + cd)
+
+    return error
 
 
 def RANSAC(function, test_function, inputs, sampler: Sampler, iterations: int, threshold: float):
@@ -315,23 +439,30 @@ def RANSAC(function, test_function, inputs, sampler: Sampler, iterations: int, t
     """
     max_inlier = -float("inf")
     final_output = None
-    final_output_set = None
     for _ in range(iterations):
         in_sample, out_sample = sampler.sample(inputs)  # Step 1
-        output = function(*in_sample)  # Step 1
+        try:
+            output = function(*in_sample)  # Step 1
+        except np.linalg.LinAlgError:
+            continue
         mask = np.abs(test_function(output, out_sample)) < threshold  # Step 2 + 3
-        new_ins = tuple([np.vstack((in_samp, out_samp[mask])) for in_samp, out_samp in zip(in_sample, out_sample)])  # Step 4
-        new_output = function(*new_ins)  # Step 4
+        new_ins = tuple([out_samp[mask] for out_samp in out_sample])  # Step 4
+        try:
+            new_output = function(*new_ins)  # Step 4
+        except np.linalg.LinAlgError:
+            continue
         mask = np.abs(test_function(new_output, new_ins)) < threshold  # Step 5
         if np.sum(mask) > max_inlier:
             max_inlier = np.sum(mask)
             final_output = new_output
-            final_output_set = tuple([new_in[mask] for new_in in new_ins])
-    return final_output, final_output_set
+            
+    mask = np.abs(test_function(final_output, inputs)) < threshold  # Step 5
+
+    return final_output, mask
 
 
-def isRotationMatrix(R):
-    #  https://learnopencv.com/rotation-matrix-to-euler-angles/
+def is_rotation_matrix(R):
+    # https://learnopencv.com/rotation-matrix-to-euler-angles/
     # Checks if a matrix is a valid rotation matrix.
     Rt = np.transpose(R)
     shouldBeIdentity = np.dot(Rt, R)
@@ -340,13 +471,13 @@ def isRotationMatrix(R):
     return n < 1e-6
 
 
-def rotationMatrixToEulerAngles(R):
-    #  https://learnopencv.com/rotation-matrix-to-euler-angles/
+def rotation_matrix_to_euler_angles(R):
+    # https://learnopencv.com/rotation-matrix-to-euler-angles/
     # Calculates rotation matrix to euler angles
     # The result is the same as MATLAB except the order
     # of the euler angles ( x and z are swapped ).
-    import math
-    assert(isRotationMatrix(R))
+
+    assert(is_rotation_matrix(R))
 
     sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
 
@@ -372,6 +503,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image2", type=Path, default='data/towerRight.jpg')
     parser.add_argument("--K1", type=Path, default=None)
     parser.add_argument("--K2", type=Path, default=None)
+    parser.add_argument("--visualize", action="store_true")
     return parser.parse_args()
 
 
@@ -425,14 +557,22 @@ def main() -> int:
 
     sampler = EightCorrespondenceSampler(sample_size=8)
 
-    F, inliers = RANSAC(function=get_fundamental_matrix,
+    F, mask = RANSAC(function=get_fundamental_matrix,
                         test_function=fundamental_equality,
                         inputs=(pts1, pts2),
                         sampler=sampler,
                         iterations=args.ransac_iters,
-                        threshold=0.1)
+                        threshold=3)
     print(f'Fundamental matrix:\n{F}')
-    print(f'Percentage of inlier points / total input points {inliers[0].shape[0]} / {pts1.shape[0]} = {inliers[0].shape[0] / pts1.shape[0]:.1%}.')
+    print(f'Percentage of inlier points / total input points {mask.mean():.1%}.')
+
+    F_cv2, mask_cv2 = cv2.findFundamentalMat(pts1, pts2, method=cv2.FM_8POINT)
+    assert np.isclose(get_fundamental_matrix(pts1, pts2), F_cv2).all()
+
+    F_cv2, mask_cv2 = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 3, 0.99)
+
+    if args.visualize:
+        sr_utils.visualize_epipolar_lines(img1, img2, pts1, pts2, F, F_cv2)
 
     # h_pts1 = np.hstack((pts1, np.ones((pts1.shape[0], 1))))
     # h_pts2 = np.hstack((pts2, np.ones((pts2.shape[0], 1))))
@@ -454,7 +594,7 @@ def main() -> int:
         calibrated_pts1 = np.linalg.inv(K1) @ h_pts1
         calibrated_pts2 = np.linalg.inv(K2) @ h_pts2
 
-        assert all(((calibrated_pts1).T)[:, 2] == 1)
+        assert all(((calibrated_pts1).T)[:, 2] == 1)  # Only true when calibration matrices are normalized
         assert all(((calibrated_pts2).T)[:, 2] == 1)
 
         calibrated_pts1 = (calibrated_pts1.T)[:, :2]
@@ -464,28 +604,27 @@ def main() -> int:
 
         def get_essential_matrix_c(x, xp): return get_essential_matrix(x, xp, c, cp)
         def essential_equality_c(x, xp): return essential_equality(x, xp, c, cp)
-        E, inliers = RANSAC(function=get_essential_matrix_c,
+        E, E_mask = RANSAC(function=get_essential_matrix_c,
                             test_function=essential_equality_c,
                             inputs=(calibrated_pts1, calibrated_pts2),
                             sampler=sampler,
                             iterations=args.ransac_iters,
-                            threshold=0.1/20)
+                            threshold=1/10_000)
 
-        print(f'Essential matrix:\n{E}')
-        print(f'Percentage of inlier points / total input points {inliers[0].shape[0]} / {pts1.shape[0]} = {inliers[0].shape[0] / pts1.shape[0]:.1%}.')
+        E_cv2, E_mask_cv2 = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.999, 1/1_000)
 
-        # h_pts1 = np.hstack((pts1, np.ones((pts1.shape[0], 1))))
-        # h_pts2 = np.hstack((pts2, np.ones((pts2.shape[0], 1))))
-        # err = 0
-        # for p1, p2 in zip(h_pts1, h_pts2):
-        #     p1 = p1.reshape(-1, 1)
-        #     p2T = p2.reshape(1, -1)
-        #     err += np.abs(p2T @ F @ p1)
+        print(f'Essential matrix:\n{E_cv2}')
+        print(f'Percentage of inlier points / total input points {E_mask_cv2.mean():.1%}.')
 
-        R, t = get_baseline(E, inliers[0], inliers[1], c, cp)
+        R, t = get_baseline(E, calibrated_pts1[E_mask], calibrated_pts2[E_mask], c, cp)
 
         print(f'Second camera orientation:\n{R}')
         print(f'Baseline:\n{t}')
+
+        R_cv2, t_cv2 = get_baseline(E_cv2, calibrated_pts1[E_mask_cv2[:,0].astype(bool)], calibrated_pts2[E_mask_cv2[:,0].astype(bool)], c, cp)
+
+        print(f'Second camera orientation:\n{R_cv2}')
+        print(f'Baseline:\n{t_cv2}')
 
         # Ecv, mask = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.9999, 0.01)
         # in_calibrated_pts1 = []
