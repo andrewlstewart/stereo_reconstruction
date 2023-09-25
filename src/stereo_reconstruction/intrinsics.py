@@ -189,7 +189,7 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
     AAT = np.linalg.cholesky(B)  # https://www.youtube.com/watch?v=-9He7Nu3u8s&t=1529s
 
     K = np.linalg.inv(np.transpose(AAT))
-    # K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
+    K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
 
     return K
 
