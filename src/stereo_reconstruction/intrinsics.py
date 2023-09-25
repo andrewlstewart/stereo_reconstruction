@@ -238,7 +238,7 @@ def main() -> int:
     if args.use_opencv:
         right_bad_images = []
     else:
-        right_bad_iamges = ['image01', 'image02', 'image03', 'image04', 'image05']
+        right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05']
     right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
 
     right_K = get_camera_matrix(images=right_images[1:], pattern_size=pattern_size, square_size=square_size, visualize=False)
