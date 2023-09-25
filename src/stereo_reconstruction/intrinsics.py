@@ -60,23 +60,23 @@ def get_corners(img: Tuple[str, npt.NDArray[np.float32]], pattern_size=Tuple[int
     if ret:
         # termination criteria
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-
-        corners2 = cv2.cornerSubPix(img_gray, img_corners, (11, 11), (-1, -1), criteria)
+        
+        corners = cv2.cornerSubPix(img_gray, img_corners, (11, 11), (-1, -1), criteria)
 
         if visualize:
             # Draw and display the corners
-            img = cv2.drawChessboardCorners(img, pattern_size, corners2, ret)
+            img = cv2.drawChessboardCorners(img, pattern_size, corners, ret)
 
             print(name)
-            minx, miny = np.min(corners2, axis=0)[0]
-            maxx, maxy = np.max(corners2, axis=0)[0]
+            minx, miny = np.min(corners, axis=0)[0]
+            maxx, maxy = np.max(corners, axis=0)[0]
             plt.imshow(img[int(miny*0.9):int(maxy*1.1), int(minx*0.9):int(maxx*1.1), :])
             plt.show()
 
     else:
         print("image didn't work")
 
-    return corners2[:, 0, :], img
+    return corners[:, 0, :], img
 
 
 def get_homography(image_coordinates: npt.NDArray[np.float32], world_coordinates: npt.NDArray[np.float32]):
@@ -156,40 +156,51 @@ def get_B(V: npt.NDArray[np.float32]):
 def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
                       pattern_size: Tuple[int, int],
                       square_size: float,
-                      visualize=False) -> npt.NDArray[np.float32]:
+                      visualize=False,
+                      use_OpenCV=False) -> npt.NDArray[np.float32]:
     """
     Each element in images is a tuple where the first value is the filename of the image and the second value is the numpy array
 
     This function follows Zhang's method as outlined in Professor Cyrill Stachniss's lecture https://www.youtube.com/watch?v=-9He7Nu3u8s
     Need a minimum of 4 points per plane and 3 views of the plane @ 31m09s
     """
-
-    H_img = []
-    V_img = []
+    if use_OpenCV:
+        objpoints = []
+        imgpoints = []   
+    else:
+        H_img = []
+        V_img = []
 
     # Construct the checkerboard corner coordinates in the world plane of the checkerboard
     # (x, y) with z=0 for all x,y
-    X = np.zeros((pattern_size[0]*pattern_size[1], 2), np.float32)
+    X = np.zeros((pattern_size[0]*pattern_size[1], 3), np.float32)
     X[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)*square_size
 
     # For each image compute the homography and then the V matrix
     for name, img in images:
         x, img = get_corners((name, img), pattern_size, visualize)
 
-        h = get_homography(x, X)
-        H_img.append(h)
+        if use_OpenCV:
+            objpoints.append(X)
+            imgpoints.append(x)
+        else:
+            h = get_homography(x, X[:, :2])
+            H_img.append(h)
 
-        v = get_V(h)
-        V_img.append(v)
+            v = get_V(h)
+            V_img.append(v)
 
-    # For the set of images, stack them to constrcut the full V matrix
-    V = np.vstack(V_img)
+    if use_OpenCV:
+        ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img.shape[::-1][1:], None, None)
+    else:
+        # For the set of images, stack them to construct the full V matrix
+        V = np.vstack(V_img)
 
-    B = get_B(V)
-    AAT = np.linalg.cholesky(B)  # https://www.youtube.com/watch?v=-9He7Nu3u8s&t=1529s
+        B = get_B(V)
+        AAT = np.linalg.cholesky(B)  # https://www.youtube.com/watch?v=-9He7Nu3u8s&t=1529s
 
-    K = np.linalg.inv(np.transpose(AAT))
-    K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
+        K = np.linalg.inv(np.transpose(AAT))
+        K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
 
     return K
 
@@ -200,6 +211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--square_size", type=float, default='0.0221')  # m
     parser.add_argument("--pattern_size", action=TupleArgSplitter, default=(9,6))
     parser.add_argument("--output_path", type=Path, default=Path.cwd() / 'output')
+    parser.add_argument("--use_opencv", action="store_true")
     return parser.parse_args()
 
 
@@ -215,14 +227,18 @@ def main() -> int:
     left_bad_images = []
     # My images are concatenated horizontally, so the left image is in the range 0:2027 and the right image is in the range 2028:4055
     left_images = sorted([(image_path.name, cv2.imread(str(image_path))[:, :2028, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in left_bad_images])
-    left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False)
+    
+    left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False, use_OpenCV=args.use_opencv)
 
     print(left_K)
 
     args.output_path.mkdir(parents=True, exist_ok=True)
     np.save(args.output_path / 'K1.npy', left_K)
 
-    right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05']
+    if args.use_opencv:
+        right_bad_images = []
+    else:
+        right_bad_iamges = ['image01', 'image02', 'image03', 'image04', 'image05']
     right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
 
     right_K = get_camera_matrix(images=right_images[1:], pattern_size=pattern_size, square_size=square_size, visualize=False)
