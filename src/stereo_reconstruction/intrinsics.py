@@ -272,7 +272,9 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
         K = K / K[-1, -1]  
         # is required because B, and therefore K, is recovered only up to projective scale. It is unrelated to the physical checkerboard square size.
 
-    return K
+        dist = np.zeros((1,5))
+
+    return K, dist
 
 
 def parse_args() -> argparse.Namespace:
@@ -329,18 +331,20 @@ def main() -> int:
         if path.stem not in right_bad_images
     ]
 
-    left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
+    left_K, left_distortion = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
 
     print(left_K)
 
     args.output_path.mkdir(parents=True, exist_ok=True)
     np.save(args.output_path / 'K1.npy', left_K)
+    np.save(args.output_path / 'dist1.npy', left_distortion)
 
-    right_K = get_camera_matrix(images=right_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
+    right_K, right_distortion = get_camera_matrix(images=right_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
 
     print(right_K)
 
     np.save(args.output_path / 'K2.npy', right_K)
+    np.save(args.output_path / 'dist2.npy', right_distortion)
 
     return 0
 
