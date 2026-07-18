@@ -109,6 +109,10 @@ def homography_reprojection_errors(
 
 
 def hartley_normalization(x):
+    # Described here: Hartley R. In Defence of the 8-point algorithm.
+    # https://users.cecs.anu.edu.au/~hartley/Papers/fundamental/fundamental.pdf
+    # 5.1 Isotropic Scaling
+
     u_bar, v_bar = np.mean(x, axis=0)
     d = np.mean(np.sqrt(np.pow(x[:,0] - u_bar, 2) + np.pow(x[:,1] - v_bar, 2)))
     s = np.sqrt(2) / d
