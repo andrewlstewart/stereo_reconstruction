@@ -46,7 +46,7 @@ class HomographyIllFittedError(Exception):
     """Raised when the a.T @ homography is larger than expected."""
 
 
-def get_corners(img: Tuple[str, npt.NDArray[np.float32]], pattern_size=Tuple[int, int], visualize=False):
+def get_corners(img: Tuple[str, npt.NDArray[np.float32]], pattern_size:Tuple[int, int], visualize=False):
     """
     Standard implementation to get corners from a checkerboard pattern
     https://docs.opencv.org/3.4/dc/dbb/tutorial_py_calibration.html
@@ -68,15 +68,55 @@ def get_corners(img: Tuple[str, npt.NDArray[np.float32]], pattern_size=Tuple[int
             img = cv2.drawChessboardCorners(img, pattern_size, corners, ret)
 
             print(name)
-            minx, miny = np.min(corners, axis=0)[0]
-            maxx, maxy = np.max(corners, axis=0)[0]
+            minx, miny = np.min(corners, axis=0)
+            maxx, maxy = np.max(corners, axis=0)
             plt.imshow(img[int(miny*0.9):int(maxy*1.1), int(minx*0.9):int(maxx*1.1), :])
             plt.show()
 
     else:
         print("image didn't work")
 
-    return corners[:, 0, :], img
+    return corners, img
+
+
+def homography_reprojection_errors(
+    H: npt.ArrayLike,
+    world_coordinates: npt.ArrayLike,
+    image_coordinates: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+    H = np.asarray(H, dtype=np.float64)
+    world_coordinates = np.asarray(
+        world_coordinates,
+        dtype=np.float64,
+    ).reshape(-1, 2)
+
+    image_coordinates = np.asarray(
+        image_coordinates,
+        dtype=np.float64,
+    ).reshape(-1, 2)
+
+    world_h = np.column_stack(
+        [
+            world_coordinates,
+            np.ones(world_coordinates.shape[0]),
+        ]
+    )
+
+    projected_h = (H @ world_h.T).T
+    projected = projected_h[:, :2] / projected_h[:, 2:3]
+
+    return np.linalg.norm(projected - image_coordinates, axis=1)
+
+
+def hartley_normalization(x):
+    u_bar, v_bar = np.mean(x, axis=0)
+    d = np.mean(np.sqrt(np.pow(x[:,0] - u_bar, 2) + np.pow(x[:,1] - v_bar, 2)))
+    s = np.sqrt(2) / d
+    T = np.array(((s, 0, -s*u_bar), (0, s, -s*v_bar), (0, 0, 1)))
+    x_h = np.hstack((x,np.ones(x.shape[0])[:, None]))
+    x_n = np.matmul(T, x_h.T).T
+    x_n = x_n[:, :2] / x_n[:, 2:]
+    return x_n, T
 
 
 def get_homography(image_coordinates: npt.NDArray[np.float32], world_coordinates: npt.NDArray[np.float32]):
@@ -90,8 +130,8 @@ def get_homography(image_coordinates: npt.NDArray[np.float32], world_coordinates
             https://www.youtube.com/watch?v=3NcQbZu6xt8&t=895s
     """
 
-    x = image_coordinates
-    X = world_coordinates
+    x, x_T = hartley_normalization(image_coordinates)
+    X, X_T = hartley_normalization(world_coordinates)
 
     M = np.zeros((x.shape[0]*2, 3*3))
     for idx, (xi_, Xi_) in enumerate(zip(x, X)):
@@ -105,11 +145,25 @@ def get_homography(image_coordinates: npt.NDArray[np.float32], world_coordinates
     h_vec = vh[-1, :]
     h = h_vec.reshape(3, 3)
 
-    # this just checks that the homography matrix is at least reasonable
-    if not np.all(np.matmul(M, h_vec) < 0.01):
-        raise HomographyIllFittedError()
+    H = np.linalg.inv(x_T) @ h @ X_T
 
-    return h
+    # Homographies are defined only up to a nonzero scale.
+    if abs(H[2, 2]) > np.finfo(np.float64).eps:
+        H /= H[2, 2]
+    else:
+        H /= np.linalg.norm(H)
+
+    errors = homography_reprojection_errors(
+        H,
+        world_coordinates,
+        image_coordinates,
+    )
+
+    # print(f"Mean reprojection error: {np.mean(errors):.4f} px")
+    # print(f"Median reprojection error: {np.median(errors):.4f} px")
+    # print(f"Maximum reprojection error: {np.max(errors):.4f} px")
+
+    return H
 
 
 def v_ij(h: npt.NDArray[np.float32], i: int, j: int):
@@ -157,13 +211,14 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
                       pattern_size: Tuple[int, int],
                       square_size: float,
                       visualize=False,
-                      use_OpenCV=False) -> npt.NDArray[np.float32]:
+                      opencv_vals=(False, ())) -> npt.NDArray[np.float64]:
     """
     Each element in images is a tuple where the first value is the filename of the image and the second value is the numpy array
 
     This function follows Zhang's method as outlined in Professor Cyrill Stachniss's lecture https://www.youtube.com/watch?v=-9He7Nu3u8s
     Need a minimum of 4 points per plane and 3 views of the plane @ 31m09s
     """
+    use_OpenCV, flags = opencv_vals
     if use_OpenCV:
         objpoints = []
         imgpoints = []   
@@ -191,16 +246,31 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
             V_img.append(v)
 
     if use_OpenCV:
-        ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img.shape[::-1][1:], None, None)
+        ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img.shape[::-1][1:], None, None, flags=flags)
     else:
         # For the set of images, stack them to construct the full V matrix
         V = np.vstack(V_img)
 
         B = get_B(V)
+
+        B = 0.5 * (B + B.T)
+
+        eigenvalues = np.linalg.eigvalsh(B)
+
+        if np.all(eigenvalues < 0):
+            B = -B
+            eigenvalues = np.linalg.eigvalsh(B)
+
+        if not np.all(eigenvalues > 0):
+            raise ValueError(
+                f"B is not positive definite: eigenvalues={eigenvalues}"
+            )
+
         AAT = np.linalg.cholesky(B)  # https://www.youtube.com/watch?v=-9He7Nu3u8s&t=1529s
 
         K = np.linalg.inv(np.transpose(AAT))
-        K = K / K[-1, -1]  # TODO: Do we normalize the homogeneous coordinate if we know the scale of the square_size?
+        K = K / K[-1, -1]  
+        # is required because B, and therefore K, is recovered only up to projective scale. It is unrelated to the physical checkerboard square size.
 
     return K
 
@@ -212,6 +282,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pattern_size", action=TupleArgSplitter, default=(9,6))
     parser.add_argument("--output_path", type=Path, default=Path.cwd() / 'output')
     parser.add_argument("--use_opencv", action="store_true")
+    parser.add_argument("--opencv_comparison", action="store_true")
     return parser.parse_args()
 
 
@@ -223,25 +294,49 @@ def main() -> int:
     pattern_size = args.pattern_size
     image_root = args.stereo_images_path
 
+    image_paths = sorted(image_root.glob("*.jpg"))
+
+    flags = 0
+    if args.opencv_comparison:
+        flags = (
+            cv2.CALIB_ZERO_TANGENT_DIST
+            | cv2.CALIB_FIX_K1
+            | cv2.CALIB_FIX_K2
+            | cv2.CALIB_FIX_K3
+            | cv2.CALIB_FIX_K4
+            | cv2.CALIB_FIX_K5
+            | cv2.CALIB_FIX_K6
+        )
+
     # # If there are images which cause the camera matrix computation to fail, you can add them to this list and they will get ignored
-    left_bad_images = []
+    if args.use_opencv:
+        left_bad_images = []
+        right_bad_images = []
+    else:
+        left_bad_images = []
+        right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05', 'image06']
+
     # My images are concatenated horizontally, so the left image is in the range 0:2027 and the right image is in the range 2028:4055
-    left_images = sorted([(image_path.name, cv2.imread(str(image_path))[:, :2028, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in left_bad_images])
-    
-    left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False, use_OpenCV=args.use_opencv)
+    left_images = [
+        (path.name, cv2.imread(str(path))[:, :2028, :])
+        for path in image_paths
+        if path.stem not in left_bad_images
+    ]
+
+    right_images = [
+        (path.name, cv2.imread(str(path))[:, 2028:, :])
+        for path in image_paths
+        if path.stem not in right_bad_images
+    ]
+
+    left_K = get_camera_matrix(images=left_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
 
     print(left_K)
 
     args.output_path.mkdir(parents=True, exist_ok=True)
     np.save(args.output_path / 'K1.npy', left_K)
 
-    if args.use_opencv:
-        right_bad_images = []
-    else:
-        right_bad_images = ['image01', 'image02', 'image03', 'image04', 'image05']
-    right_images = [(image_path.name, cv2.imread(str(image_path))[:, 2028:, :]) for image_path in image_root.glob('*.jpg') if image_path.stem not in right_bad_images]
-
-    right_K = get_camera_matrix(images=right_images[1:], pattern_size=pattern_size, square_size=square_size, visualize=False)
+    right_K = get_camera_matrix(images=right_images, pattern_size=pattern_size, square_size=square_size, visualize=False, opencv_vals=(args.use_opencv, flags))
 
     print(right_K)
 
