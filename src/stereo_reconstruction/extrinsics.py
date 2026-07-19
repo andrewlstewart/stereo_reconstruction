@@ -89,6 +89,8 @@ def get_fundamental_matrix(pts1: npt.NDArray[np.int32], pts2: npt.NDArray[np.int
     """
     Here be dragons.  Refer to Hartley for clear notation.
     http://www.cs.cmu.edu/afs/andrew/scs/cs/15-463/f07/proj_final/www/amichals/fundamental.pdf
+    # ^^ dead link
+    # Do a web search for: Hartley R. In Defence of the 8-point algorithm.
 
     Solves the coplanarity constrait in real coordinates.
 
@@ -125,9 +127,8 @@ def get_fundamental_matrix(pts1: npt.NDArray[np.int32], pts2: npt.NDArray[np.int
 
 
 def get_essential_matrix(npts1: npt.NDArray[np.float32],
-                         npts2: npt.NDArray[np.float32],
-                         c: float,
-                         cp: float) -> npt.NDArray[np.float32]:
+                         npts2: npt.NDArray[np.float32]
+                         ) -> npt.NDArray[np.float64]:
     """
     Solving the coplanarity constraint for calibrated cameras.  Therefore npoints need to be in calibrated space. npts = np.linalg.inv(K) @ pts
 
@@ -142,51 +143,258 @@ def get_essential_matrix(npts1: npt.NDArray[np.float32],
         I reached out to Professor Stachniss directly but I didn't get a response.  If I do hear differently, I will update the code and make a reference.
 
         https://stackoverflow.com/a/34495431
+
+    OR
+
+    Estimate the essential matrix from undistorted normalized
+    camera coordinates.
+
+    The epipolar constraint is:
+
+        u_prime.T @ E @ u = 0
+
+    where:
+
+        u       = [x,  y,  1].T
+        u_prime = [xp, yp, 1].T
     """
 
-    npts1 = npts1.T
-    npts2 = npts2.T
+    # Hartley normalization is only a numerical preconditioner.
+    normalized1, T1 = normalize(npts1.T)
+    normalized2, T2 = normalize(npts2.T)
 
-    u = npts1[0, :].reshape(-1, 1)
-    v = npts1[1, :].reshape(-1, 1)
-    up = npts2[0, :].reshape(-1, 1)
-    vp = npts2[1, :].reshape(-1, 1)
-    c_vec = np.ones_like(u) * c
-    cp_vec = np.ones_like(up) * cp
+    u = normalized1[0, :].reshape(-1, 1)
+    v = normalized1[1, :].reshape(-1, 1)
+    up = normalized2[0, :].reshape(-1, 1)
+    vp = normalized2[1, :].reshape(-1, 1)
 
-    A = np.hstack((u*up, u*vp, u*cp_vec, v*up, v*vp, v*cp_vec, up*c_vec, vp*c_vec, c_vec*cp_vec))
+    # c_vec = np.ones_like(u) * c. # TODO: look where the focal points go?
+    # cp_vec = np.ones_like(up) * cp
 
-    U, D, Vt = np.linalg.svd(A, full_matrices=True)
+    ones = np.ones_like(u)
+
+    A = np.hstack((u*up, u*vp, u, v*up, v*vp, v, up, vp, ones))
+    # A = np.hstack((u*up, u*vp, u*cp_vec, v*up, v*vp, v*cp_vec, up*c_vec, vp*c_vec, c_vec*cp_vec))
+
+    U, D, Vt = np.linalg.svd(A, full_matrices=A.shape[0] < A.shape[1])
 
     V = Vt.T
     e = V[:, -1]
     e11, e21, e31, e12, e22, e32, e13, e23, e33 = e
     Ea = np.array(((e11, e12, e13), (e21, e22, e23), (e31, e32, e33)))
 
-    Ua, Da, Vta = np.linalg.svd(Ea, full_matrices=True)
-    E = Ua @ np.diag((1, 1, 0)) @ Vta
+    # Return from Hartley-normalized coordinates to calibrated
+    # camera coordinates.
+    E_raw = T2.T @ Ea @ T1
+
+    Ua, Da, Vta = np.linalg.svd(E_raw, full_matrices=False)
+
+    sigma = 0.5 * (Da[0] + Da[1])
+    
+    E = Ua @ np.diag((sigma, sigma, 0.0)) @ Vta
+
+    # E = Ua @ np.diag((1, 1, 0)) @ Vta
 
     return E
 
 
+def decompose_essential_matrix(E: npt.ArrayLike) -> list[tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+    """
+    Return the four possible relative-camera poses represented by E:
+
+        (R1, +t)
+        (R1, -t)
+        (R2, +t)
+        (R2, -t)
+
+    Translation is recovered only up to scale.
+    """
+    U, D, Vt = np.linalg.svd(E, full_matrices=True)
+
+    assert np.isclose(D[0], D[1])  # Sb will be up to scale, so the first two diagonal elements can not equal to 1 but have to be the same
+    assert np.isclose(D[2], 0)
+
+    # The SVD may produce U and Vt whose combined determinant is -1.
+    # Because E's third singular value is zero, flipping U's final
+    # column leaves E unchanged while fixing the orientation.
+    if np.linalg.det(U @ Vt) < 0:
+        U[:, -1] *= -1.0
+
+    W = np.array(((0, -1, 0),
+                  (1, 0, 0),
+                  (0, 0, 1)))
+
+    R1 = U @ W @ Vt
+    R2 = U @ W.T @ Vt
+
+    t = U[:, -1]
+
+    for name, R in (("R1", R1), ("R2", R2)):
+        if not np.allclose(
+            R.T @ R,
+            np.eye(3),
+            atol=1e-9,
+        ):
+            raise ValueError(f"{name} is not orthogonal.")
+
+        if not np.isclose(
+            np.linalg.det(R),
+            1.0,
+            atol=1e-9,
+        ):
+            raise ValueError(
+                f"{name} is not a proper rotation: "
+                f"determinant={np.linalg.det(R)}"
+            )
+
+    return [
+        (R1, t),
+        (R1, -t),
+        (R2, t),
+        (R2, -t),
+    ]
+
+
+def triangulate_point(
+    x: npt.ArrayLike,
+    xp: npt.ArrayLike,
+    P: npt.ArrayLike,
+    Pp: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+    """
+    Triangulate one 3D point from a pair of corresponding
+    normalized image coordinates.
+
+    pt1 and pt2 have the form:
+
+        [x, y]
+
+    P1 and P2 have shape (3, 4).
+    """
+    x_, y_ = x
+    xp_, yp_ = xp
+
+    P1T = P[0, :]
+    P2T = P[1, :]
+    P3T = P[2, :]
+
+    Pp1T = Pp[0, :]
+    Pp2T = Pp[1, :]
+    Pp3T = Pp[2, :]
+
+    A = np.vstack((x_*P3T - P1T,
+                   y_*P3T - P2T,
+                   xp_*Pp3T - Pp1T,
+                   yp_*Pp3T - Pp2T
+                   ))
+
+    U_, D_, Vt_ = np.linalg.svd(A, full_matrices=True)
+
+    X_h = Vt_[-1]
+
+    if abs(X_h[3]) <= np.finfo(np.float64).eps:
+        raise ValueError(
+            "Triangulated point is at or near infinity."
+        )
+
+    X = X_h[:3] / X_h[3]
+
+    return X
+
+
+def triangulate_points(
+    x: npt.ArrayLike,
+    xp: npt.ArrayLike,
+    R: npt.ArrayLike,
+    t: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+
+    P1 = np.hstack((np.eye(3), np.zeros((3,1))))
+    P2 = np.hstack((R, t.reshape(3, 1)))
+
+    points_3d = []
+
+    for pt1, pt2 in zip(x, xp):
+        try:
+            X = triangulate_point(
+                pt1,
+                pt2,
+                P1,
+                P2,
+            )
+        except ValueError:
+            X = np.full(3, np.nan)
+
+        points_3d.append(X)
+
+    return np.asarray(points_3d)
+
+
 def get_baseline(E: npt.NDArray[np.float32],
-                 calibrated_pts1: npt.NDArray[np.float32],
-                 calibrated_pts2: npt.NDArray[np.float32],
-                 c: float,
-                 cp: float) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+                 normalized_pts1: npt.NDArray[np.float32],
+                 normalized_pts2: npt.NDArray[np.float32]) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """
     Get out the rotation and the basis vector from the essential matrix.
 
     https://www.youtube.com/watch?v=zX5NeY-GTO0&list=PLgnQpQtFTOGRYjqjdZxTEQPZuFHQa7O7Y&t=2624s
     """
-    h_pts1 = np.hstack((calibrated_pts1, np.ones((calibrated_pts1.shape[0], 1))*c)).T
-    h_pts2 = np.hstack((calibrated_pts1, np.ones((calibrated_pts2.shape[0], 1))*cp)).T
+    candidate_relative_poses = decompose_essential_matrix(E)
 
-    U, D, Vt = np.linalg.svd(E, full_matrices=True)
+    best_R = None
+    best_t = None
+    best_positive_depth_count = -1
 
-    # Ensure D[1] = D[2] = 1
-    assert np.isclose(D[0], D[1])  # Sb will be up to scale, so the first two diagonal elements can not equal to 1 but have to be the same
-    assert np.isclose(D[2], 0)
+    for index, (R, t) in enumerate(candidate_relative_poses):
+        points_3d = triangulate_points(
+            normalized_pts1,
+            normalized_pts2,
+            R,
+            t,
+        )
+
+        # Ignore points that could not be triangulated.
+        finite_mask = np.all(np.isfinite(points_3d), axis=1)
+
+        # Depth relative to the first camera, P1 = [I | 0].
+        depth1 = points_3d[:, 2]
+        # Coordinates relative to the second camera:
+        # X2 = R @ X1 + t
+        points_camera2 = (R @ points_3d.T).T + t
+        depth2 = points_camera2[:, 2]
+
+        positive_depth_mask = (
+            finite_mask
+            & (depth1 > 0.0)
+            & (depth2 > 0.0)
+        )
+
+        print(
+            f"Candidate {index}: "
+            f"{np.count_nonzero(positive_depth_mask)} / {len(points_3d)} "
+            "points in front of both cameras"
+        )
+
+        positive_depth_count = int(
+            np.count_nonzero(positive_depth_mask)
+        )
+
+        if positive_depth_count > best_positive_depth_count:
+            best_R = R
+            best_t = t
+            best_positive_depth_count = positive_depth_count
+
+    if best_R is None or best_t is None:
+        raise RuntimeError(
+            "Could not select a valid relative camera pose."
+        )
+
+    if best_positive_depth_count == 0:
+        raise RuntimeError(
+            "None of the triangulated points had positive depth "
+            "in both cameras."
+        )
+
+    return best_R, best_t
 
     best_answer = -float('inf')
     best_truths = False
@@ -198,13 +406,13 @@ def get_baseline(E: npt.NDArray[np.float32],
     W = np.array(((0, -1, 0),
                   (1, 0, 0),
                   (0, 0, 1)))
-
-    P = np.hstack((np.eye(3), np.zeros(3).reshape(-1, 1)))
+    
+    P = np.hstack((np.eye(3), np.zeros((3,1))))
     P1T = P[0, :]
     P2T = P[1, :]
     P3T = P[2, :]
     for W_, t in itertools.product((W, W.T), (U[:, -1].reshape(-1, 1), -U[:, -1].reshape(-1, 1))):
-        Pp = np.hstack((U @ W_ @ Vt, t))
+        Pp = np.hstack((R, t))
         Pp1T = Pp[0, :]
         Pp2T = Pp[1, :]
         Pp3T = Pp[2, :]
@@ -374,8 +582,6 @@ def _essential_equality(E: npt.NDArray[np.float32],
 
 def essential_equality(E: npt.NDArray[np.float32],
                        correspondences: Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]],
-                       c1: float,
-                       c2: float
                        ):
     """
     Similar to above, this is the test criteria that OpenCV uses for the essential matrix.
@@ -409,8 +615,8 @@ def essential_equality(E: npt.NDArray[np.float32],
     # }
 
     x1, x2 = correspondences
-    hx1 = np.hstack((x1, np.ones((x1.shape[0], 1))*c1)).T
-    hx2 = np.hstack((x2, np.ones((x2.shape[0], 1))*c2)).T
+    hx1 = np.hstack((x1, np.ones((x1.shape[0], 1)))).T
+    hx2 = np.hstack((x2, np.ones((x2.shape[0], 1)))).T
 
     # for idx in range(len(x1)):
     #     Ex1 = E @ hx1[:, idx]
@@ -436,29 +642,72 @@ def essential_equality(E: npt.NDArray[np.float32],
 def RANSAC(function, test_function, inputs, sampler: Sampler, iterations: int, threshold: float):
     """
     https://vitalflux.com/ransac-regression-explained-with-python-examples/#RANSAC_Regression_Algorithm_Details
+    ^^ dead link :-/
+
+    From ChatGPT:
+
+    The corrected algorithm now does the intended sequence:
+
+    Fit from a random minimal sample.
+    Score against all points.
+    Refit using all candidate inliers.
+    Score the refined model against all points.
+    Retain the model with the most inliers and lowest tie-break error.
+    
     """
-    max_inlier = -float("inf")
-    final_output = None
+
+    best_model = None
+    best_mask = None
+    best_inlier_count = -1
+    best_mean_error = np.inf
+
     for _ in range(iterations):
-        in_sample, out_sample = sampler.sample(inputs)  # Step 1
+        in_sample, _ = sampler.sample(inputs)  # Step 1
         try:
             output = function(*in_sample)  # Step 1
         except np.linalg.LinAlgError:
             continue
-        mask = np.abs(test_function(output, out_sample)) < threshold  # Step 2 + 3
-        new_ins = tuple([out_samp[mask] for out_samp in out_sample])  # Step 4
+        errors = test_function(output, inputs)
+        mask = np.abs(errors) < threshold  # Step 2 + 3
+        
+        if np.count_nonzero(mask) < sampler.sample_size:
+            continue
+
+        new_ins = tuple([input_[mask] for input_ in inputs])  # Step 4
+ 
         try:
             new_output = function(*new_ins)  # Step 4
         except np.linalg.LinAlgError:
             continue
-        mask = np.abs(test_function(new_output, new_ins)) < threshold  # Step 5
-        if np.sum(mask) > max_inlier:
-            max_inlier = np.sum(mask)
-            final_output = new_output
-            
-    mask = np.abs(test_function(final_output, inputs)) < threshold  # Step 5
 
-    return final_output, mask
+        new_errors = test_function(new_output, inputs)
+        new_mask = np.abs(new_errors) < threshold  # Step 5
+        
+        inlier_count = int(np.count_nonzero(new_mask))
+
+        if inlier_count < sampler.sample_size:
+            continue
+
+        mean_inlier_error = float(
+            np.mean(new_errors[new_mask])
+        )
+
+        # Prefer more inliers. Use residual error as a tie-breaker.
+        is_better = (
+            inlier_count > best_inlier_count
+            or (
+                inlier_count == best_inlier_count
+                and mean_inlier_error < best_mean_error
+            )
+        )
+
+        if is_better:
+            best_model = new_output
+            best_mask = new_mask
+            best_inlier_count = inlier_count
+            best_mean_error = mean_inlier_error
+
+    return best_model, best_mask
 
 
 def is_rotation_matrix(R):
@@ -503,7 +752,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image2", type=Path, default='data/towerRight.jpg')
     parser.add_argument("--K1", type=Path, default=None)
     parser.add_argument("--K2", type=Path, default=None)
+    parser.add_argument("--dist1", type=Path, default=None)
+    parser.add_argument("--dist2", type=Path, default=None)
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 
@@ -544,8 +796,8 @@ def main() -> int:
             pts1.append(kp1[m.queryIdx].pt)
             pts2.append(kp2[m.trainIdx].pt)
 
-    pts1 = np.int32(pts1)
-    pts2 = np.int32(pts2)
+    pts1 = np.asarray(pts1, dtype=np.float64) # Mantain subpixel accuracy
+    pts2 = np.asarray(pts2, dtype=np.float64)
 
     # plot matching points
     cv_kp1 = [cv2.KeyPoint(x=float(pt[0]), y=float(pt[1]), size=1) for pt in pts1]
@@ -557,12 +809,37 @@ def main() -> int:
 
     sampler = EightCorrespondenceSampler(sample_size=8)
 
+    K1 = np.load(args.K1)
+    K2 = np.load(args.K2)
+
+    c = K1[0, 0] # TODO: Investigate why this isn't used for the essential matrix
+    cp = K2[0, 0]
+
+    dist1 = np.load(args.dist1)
+    dist2 = np.load(args.dist2)
+
+    undistorted_pts1 = cv2.undistortPoints(
+        pts1.reshape(-1, 1, 2),
+        K1,
+        dist1,
+        R=None,
+        P=K1,
+    ).reshape(-1, 2)
+
+    undistorted_pts2 = cv2.undistortPoints(
+        pts2.reshape(-1, 1, 2),
+        K2,
+        dist2,
+        R=None,
+        P=K2,
+    ).reshape(-1, 2)
+
     F, mask = RANSAC(function=get_fundamental_matrix,
-                        test_function=fundamental_equality,
-                        inputs=(pts1, pts2),
-                        sampler=sampler,
-                        iterations=args.ransac_iters,
-                        threshold=3)
+                     test_function=fundamental_equality,
+                     inputs=(undistorted_pts1, undistorted_pts2),
+                     sampler=sampler,
+                     iterations=args.ransac_iters,
+                     threshold=3**2)
     print(f'Fundamental matrix:\n{F}')
     print(f'Percentage of inlier points / total input points {mask.mean():.1%}.')
 
@@ -582,60 +859,76 @@ def main() -> int:
     #     p2T = p2.reshape(1, -1)
     #     err += np.abs(p2T @ F @ p1)
 
-    if args.K1 and args.K2:
-        K1 = np.load(args.K1)
-        K2 = np.load(args.K2)
-        c = K1[0, 0]
-        cp = K2[0, 0]
+    # h_pts1 = np.hstack((pts1, np.ones((pts1.shape[0], 1)))).T
+    # h_pts2 = np.hstack((pts2, np.ones((pts2.shape[0], 1)))).T
 
-        h_pts1 = np.hstack((pts1, np.ones((pts1.shape[0], 1)))).T  # Is there something wrong around here?
-        h_pts2 = np.hstack((pts2, np.ones((pts2.shape[0], 1)))).T
+    # calibrated_pts1 = np.linalg.inv(K1) @ h_pts1
+    # calibrated_pts2 = np.linalg.inv(K2) @ h_pts2
 
-        calibrated_pts1 = np.linalg.inv(K1) @ h_pts1
-        calibrated_pts2 = np.linalg.inv(K2) @ h_pts2
+    # # assert all(((calibrated_pts1).T)[:, 2] == 1)  # Only true when calibration matrices are normalized
+    # # assert all(((calibrated_pts2).T)[:, 2] == 1)
 
-        assert all(((calibrated_pts1).T)[:, 2] == 1)  # Only true when calibration matrices are normalized
-        assert all(((calibrated_pts2).T)[:, 2] == 1)
+    # calibrated_pts1 = (calibrated_pts1.T)[:, :2]
+    # calibrated_pts2 = (calibrated_pts2.T)[:, :2]
 
-        calibrated_pts1 = (calibrated_pts1.T)[:, :2]
-        calibrated_pts2 = (calibrated_pts2.T)[:, :2]
+    normalized_pts1 = cv2.undistortPoints(
+        pts1.reshape(-1, 1, 2),
+        K1,
+        dist1,
+    ).reshape(-1, 2)
 
-        sampler = EightCorrespondenceSampler(sample_size=8)
+    normalized_pts2 = cv2.undistortPoints(
+        pts2.reshape(-1, 1, 2),
+        K2,
+        dist2,
+    ).reshape(-1, 2)
 
-        def get_essential_matrix_c(x, xp): return get_essential_matrix(x, xp, c, cp)
-        def essential_equality_c(x, xp): return essential_equality(x, xp, c, cp)
-        E, E_mask = RANSAC(function=get_essential_matrix_c,
-                            test_function=essential_equality_c,
-                            inputs=(calibrated_pts1, calibrated_pts2),
-                            sampler=sampler,
-                            iterations=args.ransac_iters,
-                            threshold=1/10_000)
+    sampler = EightCorrespondenceSampler(sample_size=8)
 
-        E_cv2, E_mask_cv2 = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.999, 1/1_000)
+    # def get_essential_matrix_c(x, xp): return get_essential_matrix(x, xp, c, cp)
+    def get_essential_matrix_c(x, xp): return get_essential_matrix(x, xp)
+    # def essential_equality_c(x, xp): return essential_equality(x, xp, c, cp)
+    def essential_equality_c(x, xp): return essential_equality(x, xp)
+    distance_threshold = 1.0 / 1_000.0
+    E, E_mask = RANSAC(function=get_essential_matrix_c,
+                        test_function=essential_equality_c,
+                        inputs=(normalized_pts1, normalized_pts2),
+                        sampler=sampler,
+                        iterations=args.ransac_iters,
+                        threshold=distance_threshold**2)
 
-        print(f'Essential matrix:\n{E_cv2}')
-        print(f'Percentage of inlier points / total input points {E_mask_cv2.mean():.1%}.')
+    E_cv2, E_mask_cv2 = cv2.findEssentialMat(normalized_pts1, normalized_pts2, np.eye(3), cv2.RANSAC, 0.999, 1/1_000)
 
-        R, t = get_baseline(E, calibrated_pts1[E_mask], calibrated_pts2[E_mask], c, cp)
+    print(f"Custom essential matrix:\n{E}")
+    print(
+        "Custom inliers: "
+        f"{E_mask.mean():.1%} "
+        f"({np.count_nonzero(E_mask)} / {len(E_mask)})"
+    )
 
-        print(f'Second camera orientation:\n{R}')
-        print(f'Baseline:\n{t}')
+    print(f"\nOpenCV essential matrix:\n{E_cv2}")
+    print(f'Percentage of inlier points / total input points {E_mask_cv2.mean():.1%}.')
 
-        R_cv2, t_cv2 = get_baseline(E_cv2, calibrated_pts1[E_mask_cv2[:,0].astype(bool)], calibrated_pts2[E_mask_cv2[:,0].astype(bool)], c, cp)
+    R, t = get_baseline(E, normalized_pts1[E_mask], normalized_pts2[E_mask])
 
-        print(f'Second camera orientation:\n{R_cv2}')
-        print(f'Baseline:\n{t_cv2}')
+    print(f'Second camera orientation:\n{R}')
+    print(f"Translation direction:\n{t}")
 
-        # Ecv, mask = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.9999, 0.01)
-        # in_calibrated_pts1 = []
-        # in_calibrated_pts2 = []
-        # for idx, m in enumerate(mask[:,0]):
-        #     if m:
-        #         in_calibrated_pts1.append(calibrated_pts1[idx])
-        #         in_calibrated_pts2.append(calibrated_pts2[idx])
-        # in_calibrated_pts1 = np.vstack(in_calibrated_pts1)
-        # in_calibrated_pts2 = np.vstack(in_calibrated_pts2)
-        # Rcv, tcv = get_baseline(Ecv, in_calibrated_pts1, in_calibrated_pts2, c, cp)
+    R_cv2, t_cv2 = get_baseline(E_cv2, normalized_pts1[E_mask_cv2[:,0].astype(bool)], normalized_pts2[E_mask_cv2[:,0].astype(bool)])
+
+    print(f'Second camera orientation:\n{R_cv2}')
+    print(f'Translation direction:\n{t_cv2}')
+
+    # Ecv, mask = cv2.findEssentialMat(calibrated_pts1, calibrated_pts2, np.eye(3), cv2.RANSAC, 0.9999, 0.01)
+    # in_calibrated_pts1 = []
+    # in_calibrated_pts2 = []
+    # for idx, m in enumerate(mask[:,0]):
+    #     if m:
+    #         in_calibrated_pts1.append(calibrated_pts1[idx])
+    #         in_calibrated_pts2.append(calibrated_pts2[idx])
+    # in_calibrated_pts1 = np.vstack(in_calibrated_pts1)
+    # in_calibrated_pts2 = np.vstack(in_calibrated_pts2)
+    # Rcv, tcv = get_baseline(Ecv, in_calibrated_pts1, in_calibrated_pts2, c, cp)
 
     return 0
 
