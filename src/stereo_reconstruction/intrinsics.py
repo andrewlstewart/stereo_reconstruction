@@ -544,6 +544,84 @@ def main() -> int:
         f"{np.max(baseline_estimates) * 1000:.3f} mm"
     )
 
+    rotation_estimates = np.asarray(
+        rotation_estimates,
+        dtype=np.float64,
+    )
+
+    translation_estimates = np.asarray(
+        translation_estimates,
+        dtype=np.float64,
+    )
+
+    baseline_estimates = np.linalg.norm(
+        translation_estimates,
+        axis=1,
+    )
+
+    q1, q3 = np.percentile(
+        baseline_estimates,
+        [25.0, 75.0],
+    )
+
+    iqr = q3 - q1
+
+    inlier_mask = (
+        (baseline_estimates >= q1 - 1.5 * iqr)
+        & (baseline_estimates <= q3 + 1.5 * iqr)
+    )
+
+    accepted_rotations = rotation_estimates[inlier_mask]
+    accepted_translations = translation_estimates[inlier_mask]
+
+    # Robust metric translation.
+    t_robust = np.median(
+        accepted_translations,
+        axis=0,
+    )
+
+    # Average rotations, then project the result back onto SO(3).
+    R_average = np.mean(
+        accepted_rotations,
+        axis=0,
+    )
+
+    U, _, Vt = np.linalg.svd(
+        R_average,
+        full_matrices=False,
+    )
+
+    correction = np.eye(3)
+    correction[2, 2] = np.linalg.det(U @ Vt)
+
+    R_robust = U @ correction @ Vt
+
+    print(
+        "Robust stereo rotation:",
+        R_robust,
+        sep="\n",
+    )
+
+    print(
+        "Robust metric translation:",
+        t_robust,
+    )
+
+    print(
+        "Robust baseline: "
+        f"{np.linalg.norm(t_robust) * 1000.0:.3f} mm"
+    )
+
+    np.save(
+        args.output_path / "R.npy",
+        R_robust,
+    )
+
+    np.save(
+        args.output_path / "t.npy",
+        t_robust,
+    )
+
     return 0
 
 
