@@ -281,6 +281,97 @@ def get_camera_matrix(images: Sequence[Tuple[str, npt.NDArray[np.float32]]],
     return K, dist
 
 
+def pose_from_homography(
+    H: npt.ArrayLike,
+    K: npt.ArrayLike,
+    world_xy: npt.ArrayLike,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """
+    Recover the board-to-camera pose from a planar homography.
+
+    H maps checkerboard coordinates [X, Y, 1] into image coordinates.
+
+    Because world_xy is expressed in physical units, t is recovered
+    in those same units.
+    """
+    H = np.asarray(
+        H,
+        dtype=np.float64,
+    ).reshape(3, 3)
+
+    K = np.asarray(
+        K,
+        dtype=np.float64,
+    ).reshape(3, 3)
+
+    world_xy = np.asarray(
+        world_xy,
+        dtype=np.float64,
+    ).reshape(-1, 2)
+
+    # A = K^-1 H = scale * [r1, r2, t]
+    A = np.linalg.solve(K, H)
+
+    a1 = A[:, 0]
+    a2 = A[:, 1]
+    a3 = A[:, 2]
+
+    # In an ideal homography, ||a1|| and ||a2|| are equal.
+    scale = 2.0 / (
+        np.linalg.norm(a1)
+        + np.linalg.norm(a2)
+    )
+
+    def construct_pose(
+        pose_scale: float,
+    ) -> tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]:
+        r1 = pose_scale * a1
+        r2 = pose_scale * a2
+        t = pose_scale * a3
+
+        r3 = np.cross(r1, r2)
+
+        R_approx = np.column_stack(
+            (r1, r2, r3)
+        )
+
+        # Project the approximate matrix onto SO(3).
+        U, _, Vt = np.linalg.svd(R_approx)
+
+        correction = np.eye(3)
+        correction[2, 2] = np.linalg.det(U @ Vt)
+
+        R = U @ correction @ Vt
+
+        return R, t
+
+    R, t = construct_pose(scale)
+
+    # Resolve the projective sign by requiring the checkerboard
+    # to lie in front of the camera.
+    world_xyz = np.column_stack(
+        (
+            world_xy,
+            np.zeros(world_xy.shape[0]),
+        )
+    )
+
+    camera_points = (
+        R @ world_xyz.T
+    ).T + t
+
+    if np.median(camera_points[:, 2]) < 0.0:
+        R, t = construct_pose(-scale)
+
+    return R, t
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stereo_images_path", type=Path, default=Path.cwd() / 'data/calibration')
@@ -349,6 +440,109 @@ def main() -> int:
 
     np.save(args.output_path / 'K2.npy', right_K)
     np.save(args.output_path / 'dist2.npy', right_distortion)
+
+    ###
+
+    world_xyz = np.zeros(
+        (
+            pattern_size[0] * pattern_size[1],
+            3,
+        ),
+        dtype=np.float64,
+    )
+
+    world_xyz[:, :2] = (
+        np.mgrid[
+            0:pattern_size[0],
+            0:pattern_size[1],
+        ]
+        .T
+        .reshape(-1, 2)
+        * square_size
+    )
+
+    world_xy = world_xyz[:, :2]
+
+    left_by_name = dict(left_images)
+    right_by_name = dict(right_images)
+
+    common_names = sorted(
+        set(left_by_name) & set(right_by_name)
+    )
+
+    baseline_estimates = []
+    translation_estimates = []
+    rotation_estimates = []
+
+    for name in common_names:
+        corners1, _ = get_corners(
+            (f"{name} left", left_by_name[name]),
+            pattern_size,
+        )
+
+        corners2, _ = get_corners(
+            (f"{name} right", right_by_name[name]),
+            pattern_size,
+        )
+
+        corners1 = corners1.reshape(-1, 2)
+        corners2 = corners2.reshape(-1, 2)
+
+        corners1 = cv2.undistortPoints(
+            corners1.reshape(-1, 1, 2),
+            left_K,
+            left_distortion,
+            P=left_K,
+        ).reshape(-1, 2)
+
+        corners2 = cv2.undistortPoints(
+            corners2.reshape(-1, 1, 2),
+            right_K,
+            right_distortion,
+            P=right_K,
+        ).reshape(-1, 2)
+
+        H1 = get_homography(corners1, world_xy)
+        H2 = get_homography(corners2, world_xy)
+
+        R1, t1 = pose_from_homography(
+            H1,
+            left_K,
+            world_xy,
+        )
+
+        R2, t2 = pose_from_homography(
+            H2,
+            right_K,
+            world_xy,
+        )
+
+        R21 = R2 @ R1.T
+        t21 = t2 - R21 @ t1
+
+        baseline_i = np.linalg.norm(t21)
+
+        print(
+            f"{name}: baseline={baseline_i * 1000:.3f} mm, "
+            f"t={t21}"
+        )
+
+        rotation_estimates.append(R21)
+        translation_estimates.append(t21)
+        baseline_estimates.append(baseline_i)
+
+    baseline_estimates = np.asarray(baseline_estimates)
+
+    print(
+        "Median baseline: "
+        f"{np.median(baseline_estimates) * 1000:.3f} mm"
+    )
+
+    print(
+        "Baseline range: "
+        f"{np.min(baseline_estimates) * 1000:.3f}–"
+        f"{np.max(baseline_estimates) * 1000:.3f} mm"
+    )
 
     return 0
 
